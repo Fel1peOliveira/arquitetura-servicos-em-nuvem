@@ -18,10 +18,12 @@ O workflow tem dois pontos de entrada (webhooks) independentes:
 
 | Webhook | Método/Path | Finalidade |
 |---|---|---|
-| `Webhook - GET /v1/menu` | `GET /v1/menu` | Retorna o cardápio com pizzas, preços, ingredientes e disponibilidade em estoque |
-| `Webhook - GET /v1/health` | `GET /v1/health` | Health check simples do próprio serviço de Catálogo |
+| `Webhook - GET /v2/menu` | `GET /v2/menu` | Retorna o cardápio com pizzas, preços, ingredientes e disponibilidade em estoque |
+| `Webhook - GET /v2/health` | `GET /v2/menu/health` | Health check simples do próprio serviço de Catálogo |
 
-O fluxo principal (`/v1/menu`) integra-se com três serviços externos simulados via HTTP:
+> **Nota:** o path real configurado no node de health é `v2/menu/health` (não `v2/health`), apesar do nome do node sugerir o contrário.
+
+O fluxo principal (`/v2/menu`) integra-se com três serviços externos simulados via HTTP:
 
 - **Chaos Monkey** — health check de infraestrutura antes de processar a requisição.
 - **Estoque** — consulta de disponibilidade de ingredientes.
@@ -31,7 +33,7 @@ Além disso, usa **Redis** como cache/fallback do último estoque conhecido e do
 
 ## Endpoints
 
-### `GET /v1/menu`
+### `GET /v2/menu`
 Autenticado via header `x-api-key`. Retorna a lista de pizzas disponíveis, promoções ativas e um bloco de `observabilidade` com o status das integrações.
 
 **Headers aceitos:**
@@ -61,7 +63,7 @@ Autenticado via header `x-api-key`. Retorna a lista de pizzas disponíveis, prom
 { "error": "unauthorized", "status": 401, "message": "x-api-key inválida ou ausente" }
 ```
 
-### `GET /v1/health`
+### `GET /v2/menu/health`
 Não exige autenticação. Retorna status fixo `UP` e a lista de dependências configuradas (não testa conectividade real, apenas confirma que as integrações estão configuradas).
 
 ```json
@@ -76,7 +78,7 @@ Não exige autenticação. Retorna status fixo `UP` e a lista de dependências c
 
 ## Fluxo detalhado
 
-1. **`Webhook - GET /v1/menu`** recebe a requisição.
+1. **`Webhook - GET /v2/menu`** recebe a requisição.
 2. Um node inicial extrai headers (`x-api-key`, `x-pedido-id`) e prepara o contexto da requisição.
 3. **`Validar x-api-key`** (IF) compara a chave recebida com a chave esperada.
    - **Inválida →** `401 - Unauthorized` monta o payload de erro → `Respond 401` retorna HTTP 401.
@@ -96,8 +98,8 @@ Não exige autenticação. Retorna status fixo `UP` e a lista de dependências c
     - **Log estruturado:** `Health - Logger` → `Preparar Log Estruturado` (monta evento com `eventId`, `status`, `level` INFO/WARN se fallback) → `Logger - POST /v1/log`.
     - **Métrica:** `Health - Logger` → `Prepara Metrics` (quantidade de pizzas retornadas) → `Logger - POST /v1/metric`.
 
-Fluxo do health check (`/v1/health`):
-`Webhook - GET /v1/health` → `Health - Catálogo` (monta status fixo `UP`) → `Respond - Health`.
+Fluxo do health check (`/v2/menu/health`):
+`Webhook - GET /v2/health` → `Health - Catálogo` (monta status fixo `UP`) → `Respond - Health`.
 
 ## Regras de negócio do cardápio
 
@@ -117,7 +119,7 @@ Promoções também são fixas no código (não dependem de estoque):
 
 ## Observabilidade
 
-Cada resposta de `/v1/menu` inclui um bloco `observabilidade` com:
+Cada resposta de `/v2/menu` inclui um bloco `observabilidade` com:
 - `chaosMonkey`: `"ok"` ou `"indisponivel"`.
 - `estoque`: `"ok"` ou `"fallback"` (indica se os dados vieram do estoque real ou do cache/mock).
 - `logger`: `"ok"` ou `"fallback-local"` (se o POST de log/health do logger falhar).
@@ -138,11 +140,13 @@ Em paralelo, dois envios assíncronos são feitos ao serviço de Logger:
 ## Tratamento de erros e resiliência
 
 - **Autenticação:** requisições sem `x-api-key` válida recebem 401 antes de qualquer chamada externa.
-- **Falha no Estoque:** ativa fallback em cascata — Redis (`catalogo:estoque`) → mock local fixo (100 unidades por ingrediente) — garantindo que o endpoint `/v1/menu` sempre responda 200, mesmo com o serviço de Estoque fora do ar.
+- **Falha no Estoque:** ativa fallback em cascata — Redis (`catalogo:estoque`) → mock local fixo (100 unidades por ingrediente) — garantindo que o endpoint `/v2/menu` sempre responda 200, mesmo com o serviço de Estoque fora do ar.
 - **Falha no Chaos Monkey/Logger:** não interrompe o fluxo; apenas é refletida no bloco `observabilidade` da resposta e/ou como log de nível `WARN`.
 
 ## Pontos de atenção
 
+- Os endpoints estão internamente rotulados como `v1` em alguns pontos (chamadas ao Logger/Estoque continuam usando `/v1/...`, e o node `Health - Catálogo` retorna `"version": "v1"`), enquanto os webhooks públicos já foram migrados para `/v2`. Vale revisar essa inconsistência de versionamento antes de publicar a API.
+- O path do health check ficou como `v2/menu/health` (aninhado sob `menu`), o que é incomum — normalmente seria um path irmão, como `v2/health`.
 - O node `Estoque - Consultar` envia uma lista de ingredientes **fixa** no corpo da requisição (não depende dos sabores do cardápio), o que pode gerar inconsistência se novos sabores forem adicionados sem atualizar essa lista.
 - O header `x-pedido-id` enviado ao Estoque está fixo como `"123"` (não reaproveita o ID de pedido gerado no início do fluxo), o que quebra a rastreabilidade ponta a ponta.
 - Workflow está marcado como `"active": false` — precisa ser ativado no n8n para os webhooks funcionarem em produção.
